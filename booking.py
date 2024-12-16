@@ -21,6 +21,7 @@ def authenticate_drive():
         gauth.LocalWebserverAuth()  # This is interactive; ensure it's set up for your app
     drive = GoogleDrive(gauth)
     return drive
+drive = authenticate_drive()
 
 def upload_to_drive(file_path, folder_id, drive):
     """
