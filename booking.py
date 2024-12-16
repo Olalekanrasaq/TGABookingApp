@@ -3,52 +3,71 @@ from datetime import datetime, timedelta
 import json
 import pandas as pd
 import streamlit.components.v1
-from pydrive2.drive import GoogleDrive
-from pydrive2.auth import GoogleAuth
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import os
 
 db_file = "bookings.json"
 image_folder = "uploaded_images"
 
-# Authenticate Google Drive
+# Authenticate Google Drive using OAuth 2.0
 @st.cache_resource
 def authenticate_drive(credentials_file):
-    gauth = GoogleAuth()
-    gauth.LoadCredentialsFile(credentials_file)
-    if gauth.credentials is None:
-        gauth.LocalWebserverAuth()
-    elif gauth.access_token_expired:
-        gauth.Refresh()
-    else:
-        gauth.Authorize()
+    creds = None
+    # The credentials.json file should contain the OAuth 2.0 credentials.
+    if os.path.exists(credentials_file):
+        creds = Credentials.from_authorized_user_file(credentials_file, scopes=["https://www.googleapis.com/auth/drive.file"])
+
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                credentials_file, scopes=["https://www.googleapis.com/auth/drive.file"]
+            )
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open(credentials_file, 'w') as token:
+            token.write(creds.to_json())
     
-    drive = GoogleDrive(gauth)
-    return drive
+    # Build the Google Drive API client
+    drive_service = build("drive", "v3", credentials=creds)
+    return drive_service
 
-drive = authenticate_drive("credentials.json")
 
-def upload_to_drive(file_path, folder_id, drive):
+drive_service = authenticate_drive("credentials.json")
+
+def upload_to_drive(file_path, folder_id, drive_service):
     """
     Upload or update a file in the specified Google Drive folder.
     """
     # Check if the file already exists in the folder
-    file_list = drive.ListFile({'q': f"'{folder_id}' in parents and trashed=false"}).GetList()
-    for file in file_list:
-        if file['title'] == "bookings.json":
+    query = f"'{folder_id}' in parents and trashed=false"
+    results = drive_service.files().list(q=query).execute()
+    files = results.get('files', [])
+    
+    existing_file = None
+    for file in files:
+        if file['name'] == "bookings.json":
             existing_file = file
             break
-    else:
-        existing_file = None
 
     # If file exists, update it; otherwise, create a new one
     if existing_file:
-        existing_file.SetContentFile(file_path)
-        existing_file.Upload()
-        return f"Updated: {existing_file['alternateLink']}"
+        # Update existing file
+        file_id = existing_file['id']
+        media = MediaFileUpload(file_path, mimetype='application/json')
+        drive_service.files().update(fileId=file_id, media_body=media).execute()
+        return f"Updated: {existing_file['webViewLink']}"
     else:
-        new_file = drive.CreateFile({'title': "bookings.json", 'parents': [{'id': folder_id}]})
-        new_file.SetContentFile(file_path)
-        new_file.Upload()
-        return f"Created: {new_file['alternateLink']}"
+        # Create new file
+        file_metadata = {'name': 'bookings.json', 'parents': [folder_id]}
+        media = MediaFileUpload(file_path, mimetype='application/json')
+        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
+        return f"Created: {file['webViewLink']}"
 
 with open(db_file, "r") as file:
     bookings = json.load(file)
@@ -184,18 +203,14 @@ elif selection == "Book Apartment":
             with open(image_filename, "wb") as f:
                 f.write(upload_image.getbuffer())
 
-            file_drive = drive.CreateFile({'title': image_filename, 'parents': [{'id': '1XTXmX8NfnzuDSwtIuHfsiGAnUS8HtTOc'}]})
-            file_drive.SetContentFile(image_filename)
-            file_drive.Upload()
+            # Upload the image to Google Drive
+            folder_id = '1XTXmX8NfnzuDSwtIuHfsiGAnUS8HtTOc'
+            file_metadata = {'name': image_filename, 'parents': [folder_id]}
+            media = MediaFileUpload(image_filename, mimetype='image/jpeg')
+            file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
-            # Get sharable link
-            file_drive.InsertPermission({
-                'type': 'anyone',
-                'value': 'anyone',
-                'role': 'reader'
-            })
-            image_link = file_drive['alternateLink']
-            image_link = f'<a href="{image_link}" target= "_blank">View image</a>'
+            # Get the file link
+            image_link = f'<a href="https://drive.google.com/file/d/{file["id"]}/view?usp=sharing" target="_blank">View image</a>'
             
             book_dict = {
                 "name": name.title(),
@@ -216,18 +231,15 @@ elif selection == "Book Apartment":
                 json.dump(bookings, file, indent=4)
 
             # Upload to Google Drive
-            drive_link = upload_to_drive("bookings.json", "1XTXmX8NfnzuDSwtIuHfsiGAnUS8HtTOc", drive)
+            drive_link = upload_to_drive("bookings.json", "1XTXmX8NfnzuDSwtIuHfsiGAnUS8HtTOc", drive_service)
 
             st.success("Room has been booked successfully!!")
 
-    
 elif selection == "Check Previous Booking":
     st.subheader("Previous Booking")
     df = pd.DataFrame(bookings)
     # Render the table with images
     st.markdown(df.to_html(escape=False, index=False), unsafe_allow_html=True)
-    
-    #st.table(df)
 
 elif selection == "Download booking data":
     with open(db_file, "r") as file:
