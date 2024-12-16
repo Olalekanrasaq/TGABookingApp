@@ -11,17 +11,20 @@ image_folder = "uploaded_images"
 
 # Authenticate Google Drive
 @st.cache_resource
-def authenticate_drive():
+def authenticate_drive(credentials_file):
     gauth = GoogleAuth()
-    credentials_dict = json.loads(st.secrets["gdrive"]["credentials"])
-    with open("credentials.json", "w") as creds_file:
-        json.dump(credentials_dict, creds_file)
-    gauth.LoadCredentialsFile("credentials.json")
-    if not gauth.credentials:
-        gauth.LocalWebserverAuth()  # This is interactive; ensure it's set up for your app
+    gauth.LoadCredentialsFile(credentials_file)
+    if gauth.credentials is None:
+        gauth.LocalWebserverAuth()
+    elif gauth.access_token_expired:
+        gauth.Refresh()
+    else:
+        gauth.Authorize()
+    
     drive = GoogleDrive(gauth)
     return drive
-drive = authenticate_drive()
+
+drive = authenticate_drive("credentials.json")
 
 def upload_to_drive(file_path, folder_id, drive):
     """
